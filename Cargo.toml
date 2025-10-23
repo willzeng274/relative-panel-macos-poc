@@ -1,0 +1,9 @@
+[package]
+name = "panel_detector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+objc = "0.2"
+cocoa = "0.24"
+libc = "0.2"
