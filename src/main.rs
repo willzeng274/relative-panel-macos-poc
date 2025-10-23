@@ -7,6 +7,9 @@ use cocoa::appkit::{NSApp, NSApplication, NSButton, NSPanel, NSScreen, NSView, N
 use cocoa::base::{id, nil, YES};
 use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 
+#[macro_use]
+extern crate objc;
+
 #[link(name = "CoreGraphics", kind = "framework")]
 #[link(name = "Foundation", kind = "framework")]
 #[link(name = "AppKit", kind = "framework")]
@@ -59,7 +62,6 @@ fn main() {
                     println!("     Window Number: {}", window.window_number);
                     println!("     PID: {}", window.pid);
 
-                    // Create overlay panel for this window
                     if let Some(panel) = create_overlay_panel(&window) {
                         panels.push(panel);
                         println!("     Created overlay panel");
@@ -82,7 +84,7 @@ fn main() {
 
                             use cocoa::appkit::NSApplicationActivationPolicy;
                             app.setActivationPolicy_(
-                                NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular,
+                                NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory,
                             );
 
                             app.activateIgnoringOtherApps_(YES);
@@ -113,12 +115,10 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
 
         let (cg_x, cg_y, orig_width, orig_height) = parse_bounds_values(&window.bounds)?;
 
-        // Convert CoreGraphics coordinates (top-left origin) to NSWindow coordinates (bottom-left origin)
-        // Get main screen height to convert coordinate systems
         let main_screen = NSScreen::mainScreen(nil);
         let screen_frame = NSScreen::frame(main_screen);
         let screen_height = screen_frame.size.height;
-        let ns_y = screen_height - cg_y - orig_height; // Convert Y coordinate
+        let ns_y = screen_height - cg_y - orig_height;
 
         println!("📺 Screen height: {}", screen_height);
 
@@ -141,11 +141,9 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
             NSSize::new(panel_width, panel_height),
         );
 
-        // Create NSPanel
         use cocoa::appkit::{NSBackingStoreType, NSWindowStyleMask};
 
-        let style_mask =
-            NSWindowStyleMask::NSTitledWindowMask | NSWindowStyleMask::NSClosableWindowMask;
+        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask;
 
         let panel: id = NSPanel::alloc(nil).initWithContentRect_styleMask_backing_defer_(
             panel_frame,
@@ -158,11 +156,13 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
             return None;
         }
 
-        // Set window level to float above normal windows but not at max level
-        panel.setLevel_(10); // NSFloatingWindowLevel is around 3, so 10 should be high enough
+        panel.setLevel_(10);
 
-        panel.setOpaque_(YES);
+        use cocoa::base::NO;
+        panel.setOpaque_(NO);
+        panel.setAlphaValue_(0.9);
         panel.setHasShadow_(YES);
+        panel.setMovableByWindowBackground_(YES);
 
         let window_title = NSString::alloc(nil).init_str("PANEL DETECTOR OVERLAY");
         NSWindow::setTitle_(panel, window_title);
@@ -202,6 +202,27 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
 
         content_view.addSubview_(button);
 
+        let close_button_size = 30.0;
+        let close_button_margin = 10.0;
+        let close_button_frame = NSRect::new(
+            NSPoint::new(
+                panel_width - close_button_size - close_button_margin,
+                panel_height - close_button_size - close_button_margin,
+            ),
+            NSSize::new(close_button_size, close_button_size),
+        );
+
+        let close_button: id = NSButton::initWithFrame_(NSButton::alloc(nil), close_button_frame);
+        if close_button != nil {
+            let close_title = NSString::alloc(nil).init_str("✕");
+            NSButton::setTitle_(close_button, close_title);
+
+            let _: () = msg_send![close_button, setTarget: panel];
+            let _: () = msg_send![close_button, setAction: sel!(orderOut:)];
+
+            content_view.addSubview_(close_button);
+        }
+
         panel.makeKeyAndOrderFront_(nil);
         panel.orderFrontRegardless();
 
@@ -216,7 +237,6 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
 }
 
 fn parse_bounds_values(bounds_str: &str) -> Option<(f64, f64, f64, f64)> {
-    // Parse "x:2181, y:1397, w:800, h:448" format
     let mut x = 0.0;
     let mut y = 0.0;
     let mut w = 0.0;
@@ -295,7 +315,6 @@ fn find_open_windows(ignored_apps: &HashSet<String>) -> Result<OpenWindowResults
             let title = get_dict_string_safe(window_dict, "kCGWindowName")
                 .unwrap_or_else(|| "No Title".to_string());
 
-            // Only process windows with exact title "Open"
             if title != "Open" {
                 continue;
             }
