@@ -1,91 +1,118 @@
 mod window_search;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::ptr::NonNull;
+use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSPanel, NSScreen,
-    NSView, NSWindowStyleMask,
+    NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use window_search::{find_windows, WindowSearchCriteria};
 
-fn main() {
-    let search_criteria = WindowSearchCriteria::new()
-        .with_title("Open")
-        .with_ignored_apps(get_ignored_apps());
+const POLL_INTERVAL_SECONDS: f64 = 5.0;
 
-    println!("SEARCHING FOR WINDOWS WITH TITLE 'Open'...\n");
+struct PanelManager {
+    panels: RefCell<HashMap<i64, Retained<NSPanel>>>,
+    search_criteria: WindowSearchCriteria,
+}
 
-    match find_windows(&search_criteria) {
-        Ok(results) => {
-            println!("Scanned {} total windows", results.total_windows);
-
-            if !results.matched_windows.is_empty() {
-                println!(
-                    "\nFOUND {} WINDOWS WITH TITLE 'Open':",
-                    results.matched_windows.len()
-                );
-
-                let mut panels: Vec<Retained<NSPanel>> = Vec::new();
-
-                for window in &results.matched_windows {
-                    println!("  '{}' from {}", window.title, window.app_name);
-                    println!("     App Name: {}", window.app_name);
-                    println!(
-                        "     Bundle ID: {}",
-                        window
-                            .bundle_identifier
-                            .as_ref()
-                            .unwrap_or(&"N/A".to_string())
-                    );
-                    println!("     Bounds: {}", window.bounds);
-                    println!("     Window Number: {}", window.window_number);
-                    println!("     PID: {}", window.pid);
-                    println!("     Layer: {}", window.layer);
-                    println!("     Alpha: {}", window.alpha);
-                    println!("     Sharing State: {}", window.sharing_state);
-                    println!("     Memory Usage: {} bytes", window.memory_usage);
-                    println!("     Is Onscreen: {}", window.is_onscreen);
-
-                    if let Some(panel) = create_overlay_panel(&window) {
-                        panels.push(panel);
-                        println!("     Created overlay panel");
-                    } else {
-                        println!("     Failed to create overlay panel");
-                    }
-                    println!();
-                }
-
-                if !panels.is_empty() {
-                    println!(
-                        "{} overlay panels created. Press Ctrl+C to exit.",
-                        panels.len()
-                    );
-
-                    let mtm = MainThreadMarker::new().unwrap();
-                    let app = NSApplication::sharedApplication(mtm);
-                    println!("NSApp initialized successfully");
-
-                    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-                    app.activate();
-
-                    println!("Starting NSApplication run loop...");
-
-                    app.run();
-                }
-            } else {
-                println!("\nNo windows with title 'Open' found");
-            }
-        }
-        Err(e) => {
-            println!("Error: {}", e);
-        }
+impl PanelManager {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            panels: RefCell::new(HashMap::new()),
+            search_criteria: WindowSearchCriteria::new()
+                .with_title("Open")
+                .with_ignored_apps(get_ignored_apps()),
+        })
     }
 
-    println!("Complete!");
+    fn check_for_windows(&self) {
+        println!("\n[POLL] Searching for windows with title 'Open'...");
+
+        match find_windows(&self.search_criteria) {
+            Ok(results) => {
+                println!("[POLL] Scanned {} total windows", results.total_windows);
+
+                let current_window_numbers: HashSet<i64> = results
+                    .matched_windows
+                    .iter()
+                    .map(|w| w.window_number)
+                    .collect();
+
+                let mut panels = self.panels.borrow_mut();
+
+                panels.retain(|window_number, panel| {
+                    let keep = current_window_numbers.contains(window_number);
+                    if !keep {
+                        println!("[POLL] Removing panel for closed window {}", window_number);
+                        panel.orderOut(None);
+                    }
+                    keep
+                });
+
+                for window in &results.matched_windows {
+                    if !panels.contains_key(&window.window_number) {
+                        println!("\n[POLL] NEW WINDOW DETECTED:");
+                        println!("  '{}' from {}", window.title, window.app_name);
+                        println!("     App Name: {}", window.app_name);
+                        println!("     Bundle ID: {}", window.bundle_identifier.as_ref().unwrap_or(&"N/A".to_string()));
+                        println!("     Bounds: {}", window.bounds);
+                        println!("     Window Number: {}", window.window_number);
+                        println!("     PID: {}", window.pid);
+                        println!("     Layer: {}", window.layer);
+                        println!("     Alpha: {}", window.alpha);
+                        println!("     Sharing State: {}", window.sharing_state);
+                        println!("     Memory Usage: {} bytes", window.memory_usage);
+                        println!("     Is Onscreen: {}", window.is_onscreen);
+
+                        if let Some(panel) = create_overlay_panel(&window) {
+                            panels.insert(window.window_number, panel);
+                            println!("     ✓ Created overlay panel");
+                        } else {
+                            println!("     ✗ Failed to create overlay panel");
+                        }
+                    }
+                }
+
+                println!("[POLL] Currently tracking {} panels", panels.len());
+            }
+            Err(e) => {
+                println!("[POLL] Error: {}", e);
+            }
+        }
+    }
+}
+
+fn main() {
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    println!("Starting panel detector with {} second polling interval...", POLL_INTERVAL_SECONDS);
+
+    let manager = PanelManager::new();
+    let manager_clone = Rc::clone(&manager);
+
+    manager.check_for_windows();
+
+    unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            POLL_INTERVAL_SECONDS,
+            true,
+            &block2::RcBlock::new(move |_timer: NonNull<NSTimer>| {
+                manager_clone.check_for_windows();
+            }),
+        );
+    }
+
+    println!("Starting NSApplication run loop...");
+    app.run();
 }
 
 fn create_overlay_panel(window: &window_search::WindowInfo) -> Option<Retained<NSPanel>> {
@@ -136,6 +163,11 @@ fn create_overlay_panel(window: &window_search::WindowInfo) -> Option<Retained<N
         panel.setAlphaValue(0.9);
         panel.setHasShadow(true);
         panel.setMovableByWindowBackground(true);
+        panel.setHidesOnDeactivate(false);
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary,
+        );
 
         let window_title = NSString::from_str("PANEL DETECTOR OVERLAY");
         panel.setTitle(&window_title);

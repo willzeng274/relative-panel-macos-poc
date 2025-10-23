@@ -256,6 +256,7 @@ dependencies = [
 name = "panel_detector"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "core-graphics",
  "objc2",
  "objc2-app-kit",
