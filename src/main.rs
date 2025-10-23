@@ -3,12 +3,13 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 
-use cocoa::appkit::{NSApp, NSApplication, NSButton, NSPanel, NSScreen, NSView, NSWindow};
-use cocoa::base::{id, nil, YES};
-use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
-
-#[macro_use]
-extern crate objc;
+use objc2::rc::Retained;
+use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSPanel,
+    NSScreen, NSView, NSWindowStyleMask,
+};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 #[link(name = "CoreGraphics", kind = "framework")]
 #[link(name = "Foundation", kind = "framework")]
@@ -54,7 +55,7 @@ fn main() {
                     results.open_windows.len()
                 );
 
-                let mut panels: Vec<id> = Vec::new();
+                let mut panels: Vec<Retained<NSPanel>> = Vec::new();
 
                 for window in &results.open_windows {
                     println!("  '{}' from {}", window.title, window.app_name);
@@ -77,25 +78,16 @@ fn main() {
                         panels.len()
                     );
 
-                    unsafe {
-                        let app = NSApp();
-                        if app != nil {
-                            println!("NSApp initialized successfully");
+                    let mtm = MainThreadMarker::new().unwrap();
+                    let app = NSApplication::sharedApplication(mtm);
+                    println!("NSApp initialized successfully");
 
-                            use cocoa::appkit::NSApplicationActivationPolicy;
-                            app.setActivationPolicy_(
-                                NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory,
-                            );
+                    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+                    app.activate();
 
-                            app.activateIgnoringOtherApps_(YES);
+                    println!("Starting NSApplication run loop...");
 
-                            println!("Starting NSApplication run loop...");
-
-                            app.run();
-                        } else {
-                            println!("Failed to get NSApp - panels may not be visible");
-                        }
-                    }
+                    app.run();
                 }
             } else {
                 println!("\nNo windows with title 'Open' found");
@@ -109,14 +101,15 @@ fn main() {
     println!("Complete!");
 }
 
-fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
+fn create_overlay_panel(window: &OpenWindow) -> Option<Retained<NSPanel>> {
+    println!("Creating NSPanel overlay for {} window...", window.app_name);
+
+    let (cg_x, cg_y, orig_width, orig_height) = parse_bounds_values(&window.bounds)?;
+
     unsafe {
-        println!("Creating NSPanel overlay for {} window...", window.app_name);
-
-        let (cg_x, cg_y, orig_width, orig_height) = parse_bounds_values(&window.bounds)?;
-
-        let main_screen = NSScreen::mainScreen(nil);
-        let screen_frame = NSScreen::frame(main_screen);
+        let mtm = MainThreadMarker::new().unwrap();
+        let main_screen = NSScreen::mainScreen(mtm).unwrap();
+        let screen_frame = main_screen.frame();
         let screen_height = screen_frame.size.height;
         let ns_y = screen_height - cg_y - orig_height;
 
@@ -141,66 +134,52 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
             NSSize::new(panel_width, panel_height),
         );
 
-        use cocoa::appkit::{NSBackingStoreType, NSWindowStyleMask};
+        let style_mask = NSWindowStyleMask::Borderless;
 
-        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask;
-
-        let panel: id = NSPanel::alloc(nil).initWithContentRect_styleMask_backing_defer_(
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
             panel_frame,
             style_mask,
-            NSBackingStoreType::NSBackingStoreBuffered,
+            NSBackingStoreType::Buffered,
             false,
         );
 
-        if panel == nil {
-            return None;
-        }
+        panel.setLevel(10);
+        panel.setOpaque(false);
+        panel.setAlphaValue(0.9);
+        panel.setHasShadow(true);
+        panel.setMovableByWindowBackground(true);
 
-        panel.setLevel_(10);
+        let window_title = NSString::from_str("PANEL DETECTOR OVERLAY");
+        panel.setTitle(&window_title);
 
-        use cocoa::base::NO;
-        panel.setOpaque_(NO);
-        panel.setAlphaValue_(0.9);
-        panel.setHasShadow_(YES);
-        panel.setMovableByWindowBackground_(YES);
-
-        let window_title = NSString::alloc(nil).init_str("PANEL DETECTOR OVERLAY");
-        NSWindow::setTitle_(panel, window_title);
-
-        let content_view: id = NSView::initWithFrame_(
-            NSView::alloc(nil),
+        let content_view = NSView::initWithFrame(
+            NSView::alloc(mtm),
             NSRect::new(
                 NSPoint::new(0.0, 0.0),
                 NSSize::new(panel_width, panel_height),
             ),
         );
 
-        if content_view == nil {
-            return None;
-        }
+        panel.setContentView(Some(&content_view));
 
-        panel.setContentView_(content_view);
-
-        let button_width = panel_width * 0.8; // 80% of panel width
-        let button_height = panel_height * 0.3; // 30% of panel height
-        let button_x = (panel_width - button_width) / 2.0; // Center horizontally
-        let button_y = (panel_height - button_height) / 2.0; // Center vertically
+        let button_width = panel_width * 0.8;
+        let button_height = panel_height * 0.3;
+        let button_x = (panel_width - button_width) / 2.0;
+        let button_y = (panel_height - button_height) / 2.0;
 
         let button_frame = NSRect::new(
             NSPoint::new(button_x, button_y),
             NSSize::new(button_width, button_height),
         );
 
-        let button: id = NSButton::initWithFrame_(NSButton::alloc(nil), button_frame);
-        if button == nil {
-            return None;
-        }
+        let button = NSButton::initWithFrame(NSButton::alloc(mtm), button_frame);
 
         let title_str = format!("PANEL DETECTED: {}", window.app_name);
-        let title = NSString::alloc(nil).init_str(&title_str);
-        NSButton::setTitle_(button, title);
+        let title = NSString::from_str(&title_str);
+        button.setTitle(&title);
 
-        content_view.addSubview_(button);
+        content_view.addSubview(&button);
 
         let close_button_size = 30.0;
         let close_button_margin = 10.0;
@@ -212,18 +191,15 @@ fn create_overlay_panel(window: &OpenWindow) -> Option<id> {
             NSSize::new(close_button_size, close_button_size),
         );
 
-        let close_button: id = NSButton::initWithFrame_(NSButton::alloc(nil), close_button_frame);
-        if close_button != nil {
-            let close_title = NSString::alloc(nil).init_str("✕");
-            NSButton::setTitle_(close_button, close_title);
+        let close_button = NSButton::initWithFrame(NSButton::alloc(mtm), close_button_frame);
+        let close_title = NSString::from_str("✕");
+        close_button.setTitle(&close_title);
+        close_button.setTarget(Some(&panel));
+        close_button.setAction(Some(objc2::sel!(orderOut:)));
 
-            let _: () = msg_send![close_button, setTarget: panel];
-            let _: () = msg_send![close_button, setAction: sel!(orderOut:)];
+        content_view.addSubview(&close_button);
 
-            content_view.addSubview_(close_button);
-        }
-
-        panel.makeKeyAndOrderFront_(nil);
+        panel.makeKeyAndOrderFront(None);
         panel.orderFrontRegardless();
 
         println!("Panel should now be visible!");
